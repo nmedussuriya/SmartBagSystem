@@ -54,11 +54,69 @@ export default function MonitorScreen() {
   
   const [showDaySelector, setShowDaySelector] = useState<boolean>(false);
   const [selectedDay, setSelectedDay] = useState<string>('');
+  
+  // State for extra items confirmation
+  const [extraItemsConfirmed, setExtraItemsConfirmed] = useState<boolean>(false);
+  const [showExtraConfirmButton, setShowExtraConfirmButton] = useState<boolean>(false);
+  const [showReadyMessage, setShowReadyMessage] = useState<boolean>(false);
 
   const getCurrentDay = (): string => {
     const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const today = new Date().getDay();
     return days[today];
+  };
+
+  // Handle extra items confirmation - NO SCAN NEEDED!
+  const confirmExtraItems = () => {
+    if (missingExtraItems.length > 0) {
+      Alert.alert(
+        '✅ Extra Items Confirmation',
+        `You have confirmed that you packed these ${missingExtraItems.length} extra item(s):\n\n${missingExtraItems.join('\n')}`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: 'Confirm', 
+            onPress: () => {
+              // Mark extra items as confirmed (no scanning needed)
+              setExtraItemsConfirmed(true);
+              setShowExtraConfirmButton(false);
+              
+              // Send confirmation to ESP32 to blink LED
+              sendLEDCommandToESP32('green', 3, 200);
+              
+              // Show success message
+              setShowReadyMessage(true);
+              
+              // Check if all items (regular) are also scanned
+              if (missingItems.length === 0) {
+                setSessionStatus('complete');
+              } else {
+                setSessionStatus('incomplete');
+              }
+              
+              // Auto-hide message after 5 seconds
+              setTimeout(() => {
+                setShowReadyMessage(false);
+              }, 5000);
+            }
+          }
+        ]
+      );
+    } else {
+      Alert.alert('Info', 'No extra items to confirm');
+    }
+  };
+
+  // Send LED command to ESP32
+  const sendLEDCommandToESP32 = (color: string, times: number, speed: number) => {
+    set(ref(database, 'led_command'), {
+      color: color,
+      times: times,
+      speed: speed,
+      timestamp: Date.now(),
+      childId: currentChild?.id
+    });
+    console.log(`LED command sent: ${color} ${times} times`);
   };
 
   const resetChildSession = async (childId: string) => {
@@ -73,6 +131,9 @@ export default function MonitorScreen() {
       setMissingItems([]);
       setMissingExtraItems([]);
       setSessionStatus('waiting');
+      setExtraItemsConfirmed(false);
+      setShowExtraConfirmButton(false);
+      setShowReadyMessage(false);
     } catch (error) {
       console.error('Error resetting child session:', error);
     }
@@ -114,12 +175,10 @@ export default function MonitorScreen() {
     );
   };
 
-  // ✅ FIXED: ONLY load child's OWN timetable - NO FALLBACKS!
   const loadScheduleForChildAndDay = async (childId: string, day: string): Promise<{ periods: string[], extras: string[] }> => {
     try {
       console.log(`📅 Loading timetable for ${childId} on ${day}`);
       
-      // ✅ ONLY check the child's own timetable - NO FALLBACK PATHS!
       const snapshot = await get(dbChild(ref(database), `timetable/${childId}/${day}`));
       
       const periods: string[] = [];
@@ -129,7 +188,6 @@ export default function MonitorScreen() {
         const data = snapshot.val();
         console.log(`✅ Found timetable for ${childId} on ${day}`);
         
-        // Get periods
         const periodValues = [
           data.period1,
           data.period2,
@@ -139,12 +197,10 @@ export default function MonitorScreen() {
         ].filter(Boolean);
         periods.push(...periodValues);
         
-        // Get essentials
         if (data.essentials && Array.isArray(data.essentials)) {
           periods.push(...data.essentials);
         }
         
-        // Get extra items
         if (data.extraItems && Array.isArray(data.extraItems)) {
           extras.push(...data.extraItems);
         }
@@ -245,6 +301,9 @@ export default function MonitorScreen() {
     setMissingExtraItems([...extras]);
     setScannedItems([]);
     setSessionStatus('waiting');
+    setExtraItemsConfirmed(false);
+    setShowExtraConfirmButton(extras.length > 0);
+    setShowReadyMessage(false);
     await set(ref(database, `current_session/${childId}/required_count`), periods.length + extras.length);
   };
 
@@ -364,9 +423,14 @@ export default function MonitorScreen() {
         setMissingItems(missingReg);
         setMissingExtraItems(missingExtra);
         
+        // Show confirm button only if extra items are missing and not yet confirmed
+        setShowExtraConfirmButton(missingExtra.length > 0 && !extraItemsConfirmed);
+        
         const allRequired = [...requiredItems, ...extraItems];
-        if (missingReg.length === 0 && missingExtra.length === 0 && allRequired.length > 0) {
+        if (missingReg.length === 0 && (missingExtra.length === 0 || extraItemsConfirmed)) {
           setSessionStatus('complete');
+          setShowReadyMessage(true);
+          setTimeout(() => setShowReadyMessage(false), 5000);
         } else if (items.length > 0) {
           setSessionStatus('incomplete');
         } else {
@@ -376,6 +440,7 @@ export default function MonitorScreen() {
         setMissingItems([...requiredItems]);
         setMissingExtraItems([...extraItems]);
         setSessionStatus('waiting');
+        setShowExtraConfirmButton(extraItems.length > 0 && !extraItemsConfirmed);
       }
     });
 
@@ -391,7 +456,7 @@ export default function MonitorScreen() {
       unsubscribeScanned();
       unsubscribeStatus();
     };
-  }, [currentChild, requiredItems, extraItems]);
+  }, [currentChild, requiredItems, extraItems, extraItemsConfirmed]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -448,6 +513,15 @@ export default function MonitorScreen() {
           <Text style={styles.registerHint}>Register a child first in the app</Text>
         )}
       </TouchableOpacity>
+
+      {/* Ready to Go to School Banner */}
+      {showReadyMessage && (
+        <View style={styles.readyBanner}>
+          <Text style={styles.readyIcon}>🎒</Text>
+          <Text style={styles.readyText}>Ready to Go to School!</Text>
+          <Text style={styles.readySubtext}>All items packed successfully</Text>
+        </View>
+      )}
 
       {/* NFC Registration Button */}
       {currentChild && !currentChild.rfid_card && (
@@ -588,7 +662,8 @@ export default function MonitorScreen() {
            '🔄 Waiting for scans...'}
         </Text>
         <Text style={styles.progressText}>
-          📦 Scanned: {totalScanned} / {totalRequired}
+          📦 Scanned: {totalScanned} / {requiredItems.length} (Regular)
+          {extraItems.length > 0 && ` | Extra: ${extraItemsConfirmed ? '✅ Confirmed' : '⏳ Pending'}`}
         </Text>
       </View>
 
@@ -627,22 +702,35 @@ export default function MonitorScreen() {
           {extraItems.map((item, index) => (
             <View key={index} style={[styles.scheduleItem, styles.extraItemRow]}>
               <Text style={styles.extraCheckmark}>
-                {scannedItems.some(s => s.name === item) ? '✅' : '➕'}
+                {extraItemsConfirmed ? '✅' : '➕'}
               </Text>
               <Text style={[
                 styles.itemName,
                 styles.extraItemText,
-                scannedItems.some(s => s.name === item) && styles.scannedText
+                extraItemsConfirmed && styles.scannedText
               ]}>
                 {item}
               </Text>
-              {!scannedItems.some(s => s.name === item) && (
+              {!extraItemsConfirmed && (
                 <View style={styles.highlightBadge}>
                   <Text style={styles.highlightText}>⚠️ Required!</Text>
                 </View>
               )}
             </View>
           ))}
+          
+          {/* OK BUTTON FOR EXTRA ITEMS - NO SCAN NEEDED! */}
+          {showExtraConfirmButton && (
+            <TouchableOpacity style={styles.okButton} onPress={confirmExtraItems}>
+              <Text style={styles.okButtonText}>✅ OK, I've Packed These Extra Items</Text>
+            </TouchableOpacity>
+          )}
+          
+          {extraItemsConfirmed && (
+            <View style={styles.confirmedBadge}>
+              <Text style={styles.confirmedText}>✅ Extra items confirmed by parent</Text>
+            </View>
+          )}
         </View>
       )}
 
@@ -681,22 +769,6 @@ export default function MonitorScreen() {
         </View>
       )}
 
-      {/* Missing Extra Items */}
-      {missingExtraItems.length > 0 && (
-        <View style={[styles.card, styles.missingExtraCard]}>
-          <Text style={[styles.cardTitle, styles.extraTitle]}>
-            ❌ Missing Extra Items ({missingExtraItems.length})
-          </Text>
-          {missingExtraItems.map((item, index) => (
-            <View key={index} style={styles.missingItem}>
-              <Text style={styles.crossMark}>⚠️</Text>
-              <Text style={styles.missingExtraName}>{item}</Text>
-            </View>
-          ))}
-          <Text style={styles.extraWarning}>⚠️ These extra items need to be packed!</Text>
-        </View>
-      )}
-
       {/* Instruction */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>📖 How It Works</Text>
@@ -706,10 +778,11 @@ export default function MonitorScreen() {
           3. Add extra items in Timetable screen{'\n'}
           4. Select your child from the top header{'\n'}
           5. Select a day (Monday-Friday) to see schedule{'\n'}
-          6. Child scans each item on the bag{'\n'}
+          6. Child scans regular items on the bag{'\n'}
           7. ✅ Regular items appear above{'\n'}
           8. ➕ Extra items are highlighted in orange{'\n'}
-          9. 🎉 When all items scanned, status changes to "Ready for School!"
+          9. Click "OK" to confirm extra items (no scanning needed!){'\n'}
+          10. 🎉 When all regular items scanned + extra items confirmed → "Ready for School!"
         </Text>
       </View>
     </ScrollView>
@@ -761,6 +834,28 @@ const styles = StyleSheet.create({
     fontSize: 10, 
     color: '#ff9800', 
     marginTop: 8 
+  },
+  readyBanner: {
+    backgroundColor: '#4caf50',
+    margin: 15,
+    padding: 20,
+    borderRadius: 15,
+    alignItems: 'center',
+    elevation: 3,
+  },
+  readyIcon: {
+    fontSize: 40,
+    marginBottom: 5,
+  },
+  readyText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: 'white',
+  },
+  readySubtext: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.9)',
+    marginTop: 5,
   },
   nfcButton: { 
     backgroundColor: '#4caf50', 
@@ -882,11 +977,6 @@ const styles = StyleSheet.create({
     borderColor: '#ff4444', 
     borderWidth: 1 
   },
-  missingExtraCard: {
-    backgroundColor: '#fff3e0',
-    borderColor: '#ff9800',
-    borderWidth: 1,
-  },
   cardTitle: { 
     fontSize: 18, 
     fontWeight: 'bold', 
@@ -900,6 +990,30 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#e67e22',
     marginBottom: 10,
+  },
+  okButton: {
+    backgroundColor: '#4caf50',
+    padding: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginTop: 15,
+  },
+  okButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  confirmedBadge: {
+    backgroundColor: '#e8f5e9',
+    padding: 10,
+    borderRadius: 8,
+    marginTop: 10,
+    alignItems: 'center',
+  },
+  confirmedText: {
+    color: '#4caf50',
+    fontWeight: 'bold',
+    fontSize: 14,
   },
   scheduleItem: {
     flexDirection: 'row',
@@ -972,17 +1086,6 @@ const styles = StyleSheet.create({
     flex: 1, 
     fontSize: 16, 
     color: '#ff4444' 
-  },
-  missingExtraName: {
-    flex: 1,
-    fontSize: 16,
-    color: '#e67e22',
-  },
-  extraWarning: {
-    fontSize: 12,
-    color: '#e67e22',
-    textAlign: 'center',
-    marginTop: 10,
   },
   itemTime: { 
     fontSize: 12, 
