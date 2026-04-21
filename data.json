@@ -1,0 +1,10 @@
+{
+  "commands": {
+    "register_tag": false,
+    "register_tag_status": "idle"
+  },
+  "pending_registration": {
+    "tag_id": "",
+    "status": ""
+  }
+}
